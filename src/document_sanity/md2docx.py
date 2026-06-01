@@ -31,6 +31,8 @@ from typing import Callable, Optional
 
 from .docx_content import ContentBuilder, TextStyle
 from .docx_xml import RichText
+from .pdf_processor import extract_pdf_page_as_png, extract_pdf_page_text
+from .manifest import TARGET_PREFERENCES
 
 
 # ---- regex library ---------------------------------------------------------
@@ -303,10 +305,22 @@ def _render_latex_figure(inner: str, ctx: RenderContext) -> None:
             elif (ctx.figures_dir / Path(raw).name).exists():
                 path = ctx.figures_dir / Path(raw).name
 
-    if path is not None and _image_supported(path):
-        ctx.builder.image(path, caption=caption or None, alt_text=caption)
-    else:
-        ctx.builder.image_placeholder(caption=caption or "[figure]", description="")
+    if path is not None:
+        if path.suffix.lower() == '.pdf':
+            # Extract page 1 and text from page 2
+            # Use figures_dir for output if available, otherwise path.parent
+            output_dir = ctx.figures_dir if ctx.figures_dir else path.parent
+            png_path = output_dir / f"{path.stem}_p1.png"
+            if extract_pdf_page_as_png(path, png_path, 0):
+                legend = extract_pdf_page_text(path, 1)
+                # Replace caption with legend, even if empty
+                ctx.builder.image(png_path, caption=legend or None, alt_text=legend or "")
+                return
+        elif _image_supported(path):
+            ctx.builder.image(path, caption=caption or None, alt_text=caption)
+            return
+
+    ctx.builder.image_placeholder(caption=caption or "[figure]", description="")
 
 
 def _extract_latex_caption(inner: str) -> Optional[str]:
@@ -380,6 +394,26 @@ def _resolve_relative_image(src: str, ctx: RenderContext) -> Optional[Path]:
     if src.startswith(("http://", "https://", "data:")):
         return None
     p = Path(src)
+
+    # If extension is missing, try priority extensions for word
+    if not p.suffix:
+        prefs = TARGET_PREFERENCES.get('word', ('png', 'jpg'))
+        if p.is_absolute():
+            for ext in prefs:
+                candidate = p.with_suffix(f'.{ext}')
+                if candidate.exists():
+                    return candidate
+        elif ctx.figures_dir is not None:
+             for base in (ctx.figures_dir.parent, ctx.figures_dir):
+                for ext in prefs:
+                    candidate = (base / src).with_suffix(f'.{ext}').resolve()
+                    if candidate.exists():
+                        return candidate
+             for ext in prefs:
+                candidate = (ctx.figures_dir / Path(src).name).with_suffix(f'.{ext}')
+                if candidate.exists():
+                    return candidate
+
     if p.is_absolute() and p.exists():
         return p
     if ctx.figures_dir is not None:

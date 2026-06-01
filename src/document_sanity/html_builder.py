@@ -28,12 +28,13 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from .manifest import Manifest, resolve_figure
+from .manifest import Manifest, resolve_figure, TARGET_PREFERENCES
 from .preview import parse_macros
 from .variable_processor import VariableProcessor
 from .md2html import md_to_html
 from .bib import load_bib, render_entry_html, BibEntry
 from .figure_crop import copy_with_crop, pillow_available
+from .pdf_processor import extract_pdf_page_as_png, extract_pdf_page_text
 
 
 def _normalize_plotly_html_figures(figures_dir: Path, verbose: bool = False) -> None:
@@ -1148,8 +1149,19 @@ def build_html(root_dir: Path, version: str, open_browser: bool = False,
             p = Path(path)
             stem = p.stem
             if stem in fig_by_stem:
-                resolved = resolve_figure(fig_by_stem[stem], 'html', figures_dir)
+                entry = fig_by_stem[stem]
+                resolved = resolve_figure(entry, 'html', figures_dir)
                 if resolved is not None and resolved.exists():
+                    if resolved.suffix.lower() == '.pdf':
+                        # Special handling for PDF: Page 1 as image, Page 2 as caption
+                        html_dir = root_dir / 'out' / version / 'html'
+                        output_png = html_dir / 'figures' / f'{resolved.stem}_p1.png'
+                        output_png.parent.mkdir(parents=True, exist_ok=True)
+                        if extract_pdf_page_as_png(resolved, output_png, 0):
+                            legend = extract_pdf_page_text(resolved, 1)
+                            # Replace caption with legend, even if empty
+                            return f'![{legend}](figures/{output_png.name})'
+
                     # Use basename only — figures get copied flat into html/figures/
                     # and nested subdir paths get flattened by _flatten_copy below.
                     return f'![{alt}](figures/{resolved.name})'

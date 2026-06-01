@@ -137,11 +137,10 @@ class FigureEntry:
 # which is not in the default template. So .svg is deprioritized below .png
 # for pdf and listed last as a desperate fallback.
 TARGET_PREFERENCES: dict[str, tuple[str, ...]] = {
-    'pdf':     ('pdf', 'png', 'jpg', 'jpeg', 'eps', 'svg'),
-    'html':    ('html', 'htm', 'svg', 'png', 'jpg', 'jpeg', 'pdf'),
+    'pdf':     ('pdf', 'svg', 'png', 'jpg'),
+    'html':    ('html', 'pdf', 'svg', 'png', 'jpg'),
     'preview': ('png', 'jpg', 'jpeg', 'svg'),
-    # Word embeds raster only — DOCX lacks native PDF/SVG support.
-    'word':    ('png', 'jpg', 'jpeg', 'gif', 'bmp'),
+    'word':    ('png', 'jpg'),
 }
 
 
@@ -184,6 +183,16 @@ def resolve_figure(entry: FigureEntry, target: str,
     # (3) legacy `source:` path
     if entry.source:
         p = Path(entry.source)
+        if not p.suffix:
+            for ext in prefs:
+                candidate = p.with_suffix(f'.{ext}')
+                if not candidate.is_absolute():
+                    candidate_resolved = (src_root / candidate).resolve()
+                else:
+                    candidate_resolved = candidate
+                if candidate_resolved.exists():
+                    return candidate_resolved
+
         if not p.is_absolute():
             p = (src_root / p).resolve()
         if p.exists():

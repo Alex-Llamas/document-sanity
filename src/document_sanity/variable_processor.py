@@ -20,6 +20,8 @@ import json
 from pathlib import Path
 from typing import Any, Optional, Callable
 from dataclasses import dataclass
+from .manifest import resolve_figure, TARGET_PREFERENCES
+from .pdf_processor import extract_pdf_page_text, escape_latex_text
 
 
 @dataclass
@@ -233,6 +235,75 @@ class VariableProcessor:
 
     def replace_variables(self, content: str, file_path: Optional[str] = None) -> str:
         """Replace all {{variable}}, {{variable:format}}, {{fig:name}}, and {{canva:N}} in content."""
+        if self.target == 'pdf':
+            prefs = TARGET_PREFERENCES.get('pdf', ('pdf', 'svg', 'png', 'jpg'))
+            # Pre-pass to handle figure legends from PDF page 2
+            def replace_figure_env(m):
+                env_content = m.group(0)
+                resolved_pdf = None
+
+                # Find {{fig:id}} or {{canva:N}}
+                fig_match = re.search(r'\{\{(?:fig|canva):([a-zA-Z0-9_]+)\}\}', env_content)
+                if fig_match:
+                    fig_id = fig_match.group(1)
+                    if fig_id in self.figures:
+                        entry = self.figures[fig_id]
+                        resolved_pdf = resolve_figure(entry, "pdf", self.figures_dir)
+                else:
+                    # Look for \includegraphics{path}
+                    inc_match = re.search(r'\\includegraphics(?:\[[^\]]*\])?\{([^{}]+)\}', env_content)
+                    if inc_match and self.figures_dir:
+                        path_str = inc_match.group(1)
+                        p = Path(path_str)
+                        if not p.suffix:
+                            # Use priority list to find the file
+                            for ext in prefs:
+                                candidate = (self.figures_dir.parent / path_str).with_suffix(f'.{ext}')
+                                if candidate.exists():
+                                    resolved_pdf = candidate
+                                    break
+                        else:
+                            candidate = (self.figures_dir.parent / path_str)
+                            if candidate.exists():
+                                resolved_pdf = candidate
+
+                if resolved_pdf and resolved_pdf.exists() and resolved_pdf.suffix.lower() == '.pdf':
+                    legend = extract_pdf_page_text(resolved_pdf, 1)
+                    # Use legend even if empty (as per user request: "replaced. empty legend")
+                    # Replace caption. This handles one level of nested braces.
+                    env_content = re.sub(
+                        r'\\caption\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+                        f'\\\\caption{{{escape_latex_text(legend)}}}',
+                        env_content,
+                        flags=re.DOTALL
+                    )
+                return env_content
+
+            content = re.sub(r'\\begin\{figure\*?\}.*?\\end\{figure\*?\}', replace_figure_env, content, flags=re.DOTALL)
+
+            # Handle \includegraphics without extension outside of figure environments or already processed
+            def fix_includegraphics(m):
+                opts = m.group(1) or ""
+                path_str = m.group(2)
+                p = Path(path_str)
+                if not p.suffix and self.figures_dir:
+                    for ext in prefs:
+                        candidate = (self.figures_dir.parent / path_str).with_suffix(f'.{ext}')
+                        if candidate.exists():
+                            new_path = f"{path_str}.{ext}"
+                            new_opts = opts
+                            if ext == 'pdf':
+                                if new_opts:
+                                    if 'page=' not in new_opts:
+                                        new_opts += ",page=1"
+                                else:
+                                    new_opts = "page=1"
+                            return f"\\includegraphics[{new_opts}]{{{new_path}}}" if new_opts else f"\\includegraphics{{{new_path}}}"
+                return m.group(0)
+
+            content = re.sub(r'\\includegraphics\[([^\]]*)\]\{([^{}]+)\}', fix_includegraphics, content)
+            content = re.sub(r'\\includegraphics\{([^{}]+)\}', lambda m: fix_includegraphics(re.match(r'\\includegraphics()\{([^{}]+)\}', m.group(0))), content)
+
         var_pattern = r'\{\{([a-zA-Z_][a-zA-Z0-9_]*)(?::([^}]+))?\}\}'
         op_pattern = r'\{\{op:\s*(.+?)\s*(?::([^}]+))?\}\}'
         fig_pattern = r'\{\{fig:([a-zA-Z_][a-zA-Z0-9_]*)\}\}'
@@ -240,8 +311,6 @@ class VariableProcessor:
 
         lines = content.split('\n')
         result_lines = []
-
-        from .manifest import resolve_figure
 
         for line_num, line in enumerate(lines, start=1):
             # Replace figures first (both {{fig:name}} and {{canva:N}} syntax)
@@ -268,7 +337,12 @@ class VariableProcessor:
                         # figures dir (which is flattened). Use just the basename
                         # so build.py's copy step can match it up.
                         rel = f"figures/{resolved_path.name}"
-                        return f"\\includegraphics[width={width}]{{{rel}}}"
+
+                        options = [f"width={width}"]
+                        if self.target == 'pdf' and resolved_path.suffix.lower() == '.pdf':
+                            options.append("page=1")
+
+                        return f"\\includegraphics[{','.join(options)}]{{{rel}}}"
                     source = getattr(fig_entry, 'source', None)
                     if source:
                         return f"\\includegraphics[width={width}]{{{source}}}"
